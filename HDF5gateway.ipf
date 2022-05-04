@@ -390,10 +390,14 @@
 //		:return String: Status: ""=no error, otherwise, error is described in text
 //@-
 
-Function/T H5GW_ReadHDF5(parentFolder, fileName, [hdf5Path])
+Function/T H5GW_ReadHDF5(parentFolder, fileName, [hdf5Path,pathName])
 	String parentFolder, fileName, hdf5Path
+	String pathName
 	if ( ParamIsDefault(hdf5Path) )
 		hdf5Path = "/"
+	endif
+	if (ParamIsDefault(pathName) )
+		pathName = "home"
 	endif
 
 	String status = ""
@@ -409,12 +413,12 @@ Function/T H5GW_ReadHDF5(parentFolder, fileName, [hdf5Path])
 	endif
 	
 	// do the work here:
-	Variable/G fileID = H5GW__OpenHDF5_RO(fileName)
+	Variable/G fileID = H5GW__OpenHDF5_RO(fileName,pathName=pathName)
 	if ( fileID == 0 )
 		return fileName + ": could not open as HDF5 file"
 	endif
 	//   read the data (too bad that HDF5LoadGroup does not read the attributes)
-	String base_name = StringFromList(0,FileName,".")
+	String base_name = wname(StringFromList(0,FileName,"."))
 	HDF5LoadGroup/Z/L=7/O/R/T=$base_name  :, fileID, hdf5Path		//	recursive
 	if ( V_Flag != 0 )
 		SetDataFolder $oldFolder
@@ -621,15 +625,28 @@ End
 //	H5GW__OpenHDF5_RW(newFileName, replace)
 //	-------------------------------------------------------------------------------------------------------------
 //@-
-static Function H5GW__OpenHDF5_RW(newFileName, replace)
+static Function H5GW__OpenHDF5_RW(newFileName, replace,[pathName])
 	String newFileName
+	String pathName
 	Variable replace
 	Variable fileID
+	if(ParamIsDefault(pathName) )
+		pathName = "home"
+	endif
+	
 	if (replace)
-		HDF5CreateFile/P=home/Z/O fileID as newFileName
+		if(strlen(pathName)>0)
+			HDF5CreateFile/P=$pathName/Z/O fileID as newFileName
+		else
+			HDF5CreateFile/Z/O fileID as newFileName
+		endif
 	else
 		// make sure file does not exist now, or handle better
-		HDF5CreateFile/P=home/Z fileID as newFileName
+		if(strlen(pathName)>0)
+			HDF5CreateFile/P=$pathName/Z fileID as newFileName
+		else
+			HDF5CreateFile/Z fileID as newFileName
+		endif
 	endif
 	if (V_Flag != 0)
 		return 0
@@ -812,7 +829,7 @@ static Function H5GW__make_xref(parentFolder, objectPaths, group_name_list, ds_l
 	String file_info
 	sprintf file_info, ":%s:HDF5___xref", base_name
 	Make/O/N=(length,2)/T $file_info
-	Wave/T file_infoT = $file_info
+	Wave/T file_infoT = $(file_info)
 	String item
 	Variable HDF5_col = 0
 	Variable Igor_col = 1
@@ -909,29 +926,39 @@ End
 //@+
 //	.. index:: ! H5GW__OpenHDF5_RO()
 //	
-//	H5GW__OpenHDF5_RO(fileName)
+//	H5GW__OpenHDF5_RO(fileName,pathName)
 //	-------------------------------------------------------------------------------------------------------------
 //	
 //		:String fileName: name of file (with extension),
 //			either relative to current file system directory
 //			or includes absolute file system path
+//		:String pathName: name of Igor Path,
 //		:returns int: Status: 0 if error, non-zero (fileID) if successful
 //	
 //	   Assumed Parameter:
 //	
-//	    	* *home* (path): Igor path name (defines a file system 
-//			  directory in which to find the data files)
 //			  Note: data is not changed by this function
 //@-
 
-Static Function H5GW__OpenHDF5_RO(fileName)
+Static Function H5GW__OpenHDF5_RO(fileName,[pathName])
 	String fileName
-	if ( H5GW__FileExists(fileName) == 0 )
+	String pathName
+
+	if(ParamIsDefault(pathName) )
+		pathName = "home"
+	endif
+
+	if ( H5GW__FileExists(fileName,pathName=pathName) == 0 )
 		// avoid the open file dialog if the file is not found here
 		return 0
 	endif
 	Variable fileID = 0
-	HDF5OpenFile/R/P=home/Z fileID as fileName
+	if(strlen(pathName)>0)
+		HDF5OpenFile/R/P=$pathName/Z fileID as fileName
+	else
+		HDF5OpenFile/R/Z fileID as fileName
+	endif
+
 	if (V_Flag != 0)
 		return 0
 	endif
@@ -1023,7 +1050,7 @@ Static Function H5GW__HDF5ReadAttributes(fileID, hdf5Path, baseName)
 	Wave/T xref = $file_info
 
 	Variable row
-	String hdf5_path, igor_path
+	String hdf5_path, igor_path,igor_path_temp
 	length = ItemsInList(dataset_name_list)
 	for (index = 0; index < length; index = index+1)
 		hdf5_path = StringFromList(index, dataset_name_list)
@@ -1033,8 +1060,24 @@ Static Function H5GW__HDF5ReadAttributes(fileID, hdf5Path, baseName)
 			row = H5GW__findTextWaveIndex(xref, hdf5_path, 0)
 			if (row > -1)
 				igor_path = ":" + baseName + xref[row][1]
-				wave targetWave=$igor_path
-				Note/K targetWave, attribute_str
+				// jm modified: sometimes waves have "_real" and "_imag" suffix
+				igor_path_temp=igor_path+"_real"
+				if(waveExists($igor_path))
+					wave targetWave=$igor_path
+					Note/K targetWave, attribute_str
+				else
+					if(waveExists($igor_path_temp))
+//						igor_path_temp=igor_path+"_real"
+						wave targetWave=$igor_path_temp
+						Note/K targetWave, attribute_str+"(real part)"
+						igor_path_temp=igor_path+"_imag"
+						wave targetWave=$igor_path_temp
+						Note/K targetWave, attribute_str+"(imaginary part)"
+					else
+						print "Error adding Note for ",igor_path
+					endif
+				endif
+				// jm modified: sometimes waves have "_real" and "_imag" suffix
 			endif
 		endif
 	endfor
@@ -1215,10 +1258,18 @@ End
 //		:returns int: 1 if exists, 0 if does not exist
 //@-
 
-Static Function H5GW__FileExists(file_name)
+Static Function H5GW__FileExists(file_name,[pathName])
 	String file_name
+	String pathName
 	Variable fileID
-	Open/R/P=home/Z fileID as file_name	// test if it will open as a regular file
+	if(ParamIsDefault(pathName) )
+		pathName = "home"
+	endif
+	if(strlen(pathName)>0)
+		Open/R/P=$pathName/Z fileID as file_name	// test if it will open as a regular file
+	else
+		Open/R/Z fileID as file_name	// test if it will open as a regular file
+	endif
 	if ( fileID > 0 )
 		Close fileID
 		return 1
